@@ -1,0 +1,201 @@
+from absl.testing import parameterized
+import tensorflow as tf
+from tensorflow_gnn.graph import adjacency as adj
+from tensorflow_gnn.graph import graph_constants as const
+from tensorflow_gnn.graph import graph_tensor as gt
+from tensorflow_gnn.graph import graph_tensor_ops as ops
+from tensorflow_gnn.graph import normalization_ops
+
+
+ct = tf.constant
+rt = tf.ragged.constant
+
+
+class NormalizationOpsTest(tf.test.TestCase, parameterized.TestCase):
+
+  @parameterized.named_parameters(
+      ('simple',
+       gt.GraphTensor.from_pieces(
+           node_sets={
+               'signals':
+                   gt.NodeSet.from_fields(
+                       features={
+                           const.DEFAULT_STATE_NAME: ct([1., 5., 3., 2., 4.]),
+                       },
+                       sizes=[5]),
+           },
+           edge_sets={
+               'edges':
+                   gt.EdgeSet.from_fields(
+                       sizes=[25],
+                       adjacency=adj.Adjacency.from_indices(
+                           ('signals',
+                            ct([
+                                0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3,
+                                3, 3, 3, 3, 4, 4, 4, 4, 4
+                            ])), ('signals',
+                                  ct([
+                                      0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2, 3,
+                                      4, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4
+                                  ])))),
+           }), tf.repeat(ct([0.0116, 0.6364, 0.0861, 0.0316, 0.234]), 5)),
+      ('two_components',
+       gt.GraphTensor.from_pieces(
+           node_sets={
+               'signals':
+                   gt.NodeSet.from_fields(
+                       features={
+                           const.DEFAULT_STATE_NAME:
+                               rt([[1., 5., 3., 2., 4.], [1., 2., 3.]]),
+                       },
+                       sizes=[[5], [3]]),
+           },
+           edge_sets={
+               'edges':
+                   gt.EdgeSet.from_fields(
+                       sizes=[[25], [9]],
+                       adjacency=adj.Adjacency.from_indices(
+                           ('signals',
+                            rt([[
+                                0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3,
+                                3, 3, 3, 3, 4, 4, 4, 4, 4
+                            ], [0, 0, 0, 1, 1, 1, 2, 2, 2]])),
+                           ('signals',
+                            rt([[
+                                0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0,
+                                1, 2, 3, 4, 0, 1, 2, 3, 4
+                            ], [0, 1, 2, 0, 1, 2, 0, 1, 2]])))),
+           }).merge_batch_to_components(),
+       tf.concat([
+           tf.repeat(ct([0.0116, 0.6364, 0.0861, 0.0316, 0.234]), 5),
+           tf.repeat(ct([.0900, .2447, .6654]), 3)
+       ],
+                 axis=0)),
+      ('one_component_empty',
+       gt.GraphTensor.from_pieces(
+           node_sets={
+               'signals':
+                   gt.NodeSet.from_fields(
+                       features={
+                           const.DEFAULT_STATE_NAME: ct([]),
+                       }, sizes=[0]),
+           },
+           edge_sets={
+               'edges':
+                   gt.EdgeSet.from_fields(
+                       sizes=[0],
+                       adjacency=adj.Adjacency.from_indices(
+                           ('signals', ct([], dtype=tf.int32)),
+                           ('signals', ct([], dtype=tf.int32)))),
+           }), ct([])),
+      ('one_nonempty_one_empty',
+       gt.GraphTensor.from_pieces(
+           node_sets={
+               'signals':
+                   gt.NodeSet.from_fields(
+                       features={
+                           const.DEFAULT_STATE_NAME:
+                               rt([[1., 5., 3., 2., 4.], []]),
+                       },
+                       sizes=[[5], [0]]),
+           },
+           edge_sets={
+               'edges':
+                   gt.EdgeSet.from_fields(
+                       sizes=[[25], [0]],
+                       adjacency=adj.Adjacency.from_indices(
+                           ('signals',
+                            rt([[
+                                0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3,
+                                3, 3, 3, 3, 4, 4, 4, 4, 4
+                            ], []])), ('signals',
+                                       rt([[
+                                           0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1,
+                                           2, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4
+                                       ], []])))),
+           }).merge_batch_to_components(),
+       tf.concat(
+           [tf.repeat(ct([0.0116, 0.6364, 0.0861, 0.0316, 0.234]), 5),
+            ct([])],
+           axis=0)),
+  )
+  def testSoftmax(self, gt_input, want):
+    """Unit tests for the softmax function."""
+    broadcasted = ops.broadcast_node_to_edges(
+        gt_input, 'edges', const.SOURCE, feature_name=const.DEFAULT_STATE_NAME)
+    got = normalization_ops.softmax_edges_per_node(
+        gt_input, 'edges', const.TARGET, feature_value=broadcasted)
+    self.assertAllClose(got, want, atol=.001)
+
+  @parameterized.product(
+      # The descriptive names are meant to make test output easier to read.
+      relation=['EdgeToNode', 'EdgeToContext', 'NodeToContext'],
+      value=['Balanced', 'Huge', 'Tiny'])
+  def testSoftmaxGradient(self, relation, value):
+    """Tests softmax() and its derivative, also for large offsets."""
+
+    # A graph with two-to-one relationships off all kinds: edge to target node,
+    # edge to context, source node to context.
+    graph_tensor = gt.GraphTensor.from_pieces(
+        node_sets={
+            'source': gt.NodeSet.from_fields(sizes=[2]),
+            'target': gt.NodeSet.from_fields(sizes=[2]),  # 2nd node unused.
+        },
+        edge_sets={
+            'edges': gt.EdgeSet.from_fields(
+                sizes=[2],
+                adjacency=adj.Adjacency.from_indices(
+                    ('source', ct([0, 1], dtype=tf.int32)),
+                    ('target', ct([0, 0], dtype=tf.int32)))),
+        })
+
+    # Get the args that define the relation in the graph for which
+    # softmax normalization is done.
+    per_tag, name_kwarg = {
+        'EdgeToNode': (const.TARGET, dict(edge_set_name='edges')),
+        'EdgeToContext': (const.CONTEXT, dict(edge_set_name='edges')),
+        'NodeToContext': (const.CONTEXT, dict(node_set_name='source'))
+    }[relation]
+
+    # Get the target weights, before normalizing to a total of 1.
+    # Gradient computation is tested w.r.t. the first weight.
+    epsilon = 1e-5
+    unnormalized_target = {
+        'Balanced': [2., 3.],
+        'Huge': [5.-epsilon, epsilon],
+        'Tiny': [epsilon, 5.-epsilon],
+    }[value]
+
+    # Mathematically, softmax() is invariant under adding a common offset to all
+    # inputs, but the implementation has to take care that the values of exp(_)
+    # don't overflow to infs or underflow to erase the distinction between
+    # inputs. Some graceful degradation is expected once the offset is so big
+    # that adding it to the inputs starts to cancel out theit differences even
+    # before softmax() is applied.
+    for offset, atol in [(0., 1e-6),
+                         (10., 1e-6), (100., 1e-6),
+                         (-10., 1e-6), (-100., 1e-6),
+                         (1000., 1e-5), (10000., 1e-4), (100000., 1e-3)]:
+      msg = f'for offset {offset}'
+      with tf.GradientTape() as tape:
+        exp_x = tf.constant(unnormalized_target)  # Ground truth without offset.
+        x = tf.math.log(exp_x) + offset
+        tape.watch(x)
+        y_actual = normalization_ops.softmax(
+            graph_tensor, per_tag, **name_kwarg, feature_value=x)
+        y0_actual = y_actual[0]
+      # Recall y[i] = exp(x[i]) / (exp(x[0]) + exp(x[1])).
+      y_expected = exp_x / tf.reduce_sum(exp_x)
+      self.assertAllClose(y_expected, y_actual, atol=atol, rtol=0., msg=msg)
+
+      dy0_dx_actual = tape.gradient(y0_actual, x)
+      # The https://en.wikipedia.org/wiki/Quotient_rule yields:
+      dy0_dx_expected = [
+          exp_x[0] * exp_x[1], -exp_x[0] * exp_x[1]
+      ] / (exp_x[0] + exp_x[1])**2
+      self.assertAllClose(dy0_dx_expected, dy0_dx_actual,
+                          atol=atol, rtol=0., msg=msg)
+
+
+if __name__ == '__main__':
+  tf.test.main()

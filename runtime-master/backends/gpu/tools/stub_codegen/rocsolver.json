@@ -1,0 +1,13 @@
+{
+   "header":"/opt/rocm-4.5.2/include/rocsolver.h",
+   "extra_args":[
+      "-I.",
+      "-I/opt/rocm-4.5.2/include/"
+   ],
+   "functions":[
+      "rocsolver_spotrf",
+      "rocsolver_dpotrf",
+      "rocsolver_cpotrf",
+      "rocsolver_zpotrf"
+   ],
+}

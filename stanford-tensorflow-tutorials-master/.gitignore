@@ -1,0 +1,10 @@
+
+*.pdf
+
+*.SUNet
+*.pyc
+.env/*
+examples/data
+examples/graphs/*
+examples/checkpoints/*
+examples/visualization/*
